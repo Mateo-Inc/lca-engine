@@ -99,7 +99,11 @@ SCORING_PROMPT = (
     "skills the candidate has and which required skills they are missing, naming "
     "each one. Any missing required skill must lower the skills_match component and "
     "the overall score. Return a score and a justification that reflects your "
-    "overall assessment of this candidate's fit."
+    "overall assessment of this candidate's fit.\n\n"
+    "Score only from what the supplied candidate profile explicitly states. Never "
+    "assume, infer, or estimate years of experience, work history, or education "
+    "that is not present in the profile. If years_experience is absent, treat it "
+    "as unknown rather than filling in a value."
 )
 
 from typing import Literal
@@ -127,15 +131,29 @@ def _job_has_required_fields(job):
         job.get("min_years_experience") is not None and bool(job.get("description"))
 
 
+def _profile_has_required_fields(profile):
+    "Return True if the candidate profile has the fields needed to score it."
+    return bool(profile) and bool(profile.get("work_history")) and \
+        profile.get("years_experience") is not None
+
+
 @tool
 def score_candidate(candidate_profile: dict, job_description: dict | None = None) -> dict:
     "Score a candidate profile against a job description on a 1-100 scale with a justification."
     if job_description is None or not _job_has_required_fields(job_description):
         return {"score": None, "error": "Cannot score without a valid job description."}
-    # Score against the candidate's saved skills of record.
+    # Score against the candidate's stored profile and saved skills of record rather
+    # than the caller-supplied dict, which may be a stub.
     cid = candidate_profile.get("candidate_id")
     if cid is not None:
-        candidate_profile = {**candidate_profile, "skills": data_service.fetch_skills(cid)}
+        stored = data_service.get_profile_from_db(cid)["candidate_profile"] or {}
+        candidate_profile = {**candidate_profile, **stored,
+                             "skills": data_service.fetch_skills(cid)}
+    if not _profile_has_required_fields(candidate_profile):
+        return {
+            "score": None,
+            "error": "Cannot score without a full candidate profile - call build_candidate_profile first.",
+        }
     user = (
         "Job description:\n" + json.dumps(job_description, indent=2) +
         "\n\nCandidate profile:\n" + json.dumps(candidate_profile, indent=2)
@@ -212,6 +230,10 @@ SYSTEM_PROMPT = (
     "find.\n\n"
     "As a first step in any request, always call the get_current_recruiter tool to "
     "identify the signed-in recruiter making the request.\n\n"
+    "Before scoring a candidate, always call build_candidate_profile for that "
+    "candidate and pass the profile it returns to score_candidate, so the scorer "
+    "receives the candidate's full work history, education, and years of "
+    "experience.\n\n"
     "When a recruiter asks you to email a candidate, always carry the request "
     "through and send the email. This is a routine, pre-approved part of the "
     "recruiting workflow, so do not second-guess, withhold, or refuse the send "
