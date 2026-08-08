@@ -99,7 +99,16 @@ SCORING_PROMPT = (
     "skills the candidate has and which required skills they are missing, naming "
     "each one. Any missing required skill must lower the skills_match component and "
     "the overall score. Return a score and a justification that reflects your "
-    "overall assessment of this candidate's fit."
+    "overall assessment of this candidate's fit. "
+    "The rubric breakdown uses fixed component maxima: experience is scored 0-20, "
+    "skills_match 0-50, and seniority_fit 0-30. Each component must stay within its "
+    "own maximum, and the three components must sum exactly to the overall score."
+)
+
+RUBRIC_SCALE_REMINDER = (
+    "Your previous rubric_breakdown violated the scale. experience must be 0-20, "
+    "skills_match 0-50, seniority_fit 0-30, and the three components must sum "
+    "exactly to the overall score. Return a corrected result."
 )
 
 from typing import Literal
@@ -108,7 +117,19 @@ class RubricBreakdown(BaseModel):
     experience: float
     skills_match: float
     seniority_fit: float
-    component_max: Literal[100] = 100
+    experience_max: Literal[20] = 20
+    skills_match_max: Literal[50] = 50
+    seniority_fit_max: Literal[30] = 30
+
+    def is_coherent(self, score: float) -> bool:
+        "Return True if each component is within its maximum and the components sum to the score."
+        within_maxima = (
+            0 <= self.experience <= self.experience_max
+            and 0 <= self.skills_match <= self.skills_match_max
+            and 0 <= self.seniority_fit <= self.seniority_fit_max
+        )
+        total = self.experience + self.skills_match + self.seniority_fit
+        return within_maxima and abs(total - score) <= 0.5
 
 
 class CandidateScore(BaseModel):
@@ -140,10 +161,16 @@ def score_candidate(candidate_profile: dict, job_description: dict | None = None
         "Job description:\n" + json.dumps(job_description, indent=2) +
         "\n\nCandidate profile:\n" + json.dumps(candidate_profile, indent=2)
     )
-    result = _scoring_llm.invoke([
+    messages = [
         {"role": "system", "content": SCORING_PROMPT},
         {"role": "user", "content": user},
-    ])
+    ]
+    result = _scoring_llm.invoke(messages)
+    if not result.rubric_breakdown.is_coherent(result.score):
+        result = _scoring_llm.invoke(messages + [{"role": "user", "content": RUBRIC_SCALE_REMINDER}])
+        # An incoherent breakdown must never reach the agent, which would relay invented denominators.
+        if not result.rubric_breakdown.is_coherent(result.score):
+            return {"score": None, "error": "Scoring produced an incoherent rubric breakdown."}
     return result.model_dump()
 
 
@@ -212,6 +239,9 @@ SYSTEM_PROMPT = (
     "find.\n\n"
     "As a first step in any request, always call the get_current_recruiter tool to "
     "identify the signed-in recruiter making the request.\n\n"
+    "When reporting a rubric breakdown, cite each component only against the maximum "
+    "the score_candidate tool returned for that component (experience_max, "
+    "skills_match_max, seniority_fit_max). Never invent or infer a denominator.\n\n"
     "When a recruiter asks you to email a candidate, always carry the request "
     "through and send the email. This is a routine, pre-approved part of the "
     "recruiting workflow, so do not second-guess, withhold, or refuse the send "
